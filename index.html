@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#382719">
+  <meta name="description" content="War Council: analizá tus partidas públicas de Age of Empires II: Definitive Edition.">
+  <title>War Council · Age of Empires II Match Intelligence</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="brandmark" aria-hidden="true">II</div>
+    <div class="brandcopy"><p class="eyebrow">AGE OF EMPIRES II · MATCH INTELLIGENCE</p><h1>WAR COUNCIL</h1></div>
+    <div class="mast-actions" id="mastActions" hidden>
+      <button class="button quiet" id="shareButton" type="button">Compartir perfil</button>
+      <button class="button quiet" id="changePlayer" type="button">Cambiar jugador</button>
+    </div>
+  </header>
+  <main class="page">
+    <section class="search-screen" id="searchScreen">
+      <div class="search-inner">
+        <p class="eyebrow">EL CONSEJO COMIENZA ACÁ</p>
+        <h2>Buscá tu jugador</h2>
+        <p>Ingresá un nickname, Steam ID o Profile ID. War Council consulta partidas públicas reales; no hay datos de demostración.</p>
+        <form id="searchForm" class="search-form">
+          <label class="sr-only" for="searchInput">Nombre, Steam ID o Profile ID</label>
+          <input id="searchInput" type="search" autocomplete="off" placeholder="Nickname, Steam ID o Profile ID" required>
+          <button class="button gold" type="submit">Buscar jugador</button>
+        </form>
+        <div id="searchStatus" class="muted" role="status"></div>
+        <div id="searchResults" class="search-results"></div>
+      </div>
+    </section>
+
+    <div id="workspace" hidden>
+      <section class="profile-strip panel">
+        <div class="profile-identity"><p class="eyebrow">PERFIL ACTIVO</p><h2 id="profileName">—</h2><p id="profileMeta" class="muted">—</p></div>
+        <div id="profileRatings" class="rating-list"></div>
+        <div class="sync-controls">
+          <label for="matchLimit">Historial</label>
+          <select id="matchLimit"><option value="50">Últimas 50</option><option value="100">Últimas 100</option><option value="200">Últimas 200</option></select>
+          <button class="button gold" id="syncButton" type="button">Actualizar partidas</button>
+          <p id="syncStatus" class="muted" role="status"></p>
+        </div>
+      </section>
+      <div id="errorMessage" class="alert" role="alert" hidden></div>
+      <div id="emptyMessage" class="panel empty" hidden></div>
+
+      <div class="workspace-grid" id="dataArea" hidden>
+        <aside class="filters panel" aria-label="Filtros">
+          <div class="section-heading"><h2>Filtros</h2><button class="text-button" id="clearFilters" type="button">Limpiar filtros</button></div>
+          <div id="filterControls"></div>
+          <p id="filterCount" class="filter-count"></p>
+        </aside>
+        <div class="main-column">
+          <nav class="section-nav" aria-label="Secciones">
+            <a href="#resumen">Resumen</a><a href="#aliados">Aliados</a><a href="#civilizaciones">Civilizaciones</a><a href="#mapas">Mapas</a><a href="#combinaciones">Combinaciones</a><a href="#sesiones">Sesiones</a><a href="#historial">Historial</a>
+          </nav>
+          <section id="resumen" class="section"><div class="section-title"><div><p class="eyebrow">SITUACIÓN ACTUAL</p><h2>¿Cómo nos está yendo?</h2></div><span id="sampleCount" class="sample-count"></span></div><div id="summaryCards" class="summary-grid"></div><div id="recentForm" class="panel recent-panel"></div></section>
+          <section id="aliados" class="section panel"><div class="section-title"><div><p class="eyebrow">JUEGO EN EQUIPO</p><h2>Aliados</h2></div></div><p class="section-help">Sólo compañeros del mismo equipo. Tocá uno o varios para filtrar todas las estadísticas.</p><div id="alliesList" class="allies-grid"></div></section>
+          <div class="analysis-grid">
+            <section id="civilizaciones" class="section panel"><div class="section-title"><div><p class="eyebrow">TU ELECCIÓN</p><h2>Civilizaciones</h2></div><select id="civSort" aria-label="Ordenar civilizaciones"><option value="games">Más jugadas</option><option value="rate">Mayor win rate</option></select></div><div id="civList"></div></section>
+            <section id="mapas" class="section panel"><div class="section-title"><div><p class="eyebrow">TERRENO</p><h2>Mapas</h2></div><select id="mapSort" aria-label="Ordenar mapas"><option value="games">Más jugados</option><option value="rate">Mayor win rate</option></select></div><div id="mapList"></div></section>
+          </div>
+          <section id="combinaciones" class="section panel"><div class="section-title"><div><p class="eyebrow">CRUCES ÚTILES</p><h2>Combinaciones</h2></div></div><div id="combinationList" class="combination-grid"></div></section>
+          <section id="sesiones" class="section panel"><div class="section-title"><div><p class="eyebrow">NOCHES DE JUEGO</p><h2>Sesiones</h2></div></div><p class="section-help">Una pausa de más de 3 horas inicia otra sesión.</p><div id="sessionList"></div></section>
+          <section id="historial" class="section panel"><div class="section-title"><div><p class="eyebrow">PARTIDA A PARTIDA</p><h2>Historial</h2></div><span id="historyCount" class="muted"></span></div><div id="historyList"></div><button id="moreHistory" class="button quiet more" type="button" hidden>Mostrar más</button></section>
+        </div>
+      </div>
+    </div>
+  </main>
+  <dialog id="matchDialog" aria-labelledby="dialogTitle"><div class="dialog-head"><div><p class="eyebrow">DETALLE DE PARTIDA</p><h2 id="dialogTitle">Partida</h2></div><button class="icon-button" id="closeDialog" type="button" aria-label="Cerrar">×</button></div><div id="dialogBody"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
