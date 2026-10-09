@@ -1,5 +1,7 @@
 import { searchProfiles, getProfile, getMatches } from './api.js';
 import { STRATEGIES, sampleLabel, pct, normalizeMatches, filterMatches, record, aggregate, sessions } from './data.js';
+import { historyStore } from './storage.js';
+import { downloadFullHistory, refreshRecent, mergeMatches } from './history.js';
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[char]);
@@ -16,9 +18,13 @@ const noteKey = id => `war-council:notes:v1:${id}`;
 const initialFilters = () => ({ allies:[], allAllies:false, civ:'', map:'', result:'', format:'', mode:'', days:0 });
 const state = {
   profileId:null, profile:null, matches:[], lastSync:null, cachedLimit:0,
-  limit:Number(localStorage.getItem('war-council:limit')) || 100,
+  limit:[50,100,200].includes(Number(localStorage.getItem('war-council:limit')))
+    ? Number(localStorage.getItem('war-council:limit')) : 100,
   filters:initialFilters(), annotations:{}, searchResults:[], syncing:false,
-  shown:25, civSort:'games', mapSort:'games', generation:0
+  shown:25, sessionsShown:12, civSort:'games', mapSort:'games', generation:0,
+  archiveMeta:null, archiveCount:0, storageReady:false, storageError:'',
+  fullView:false, fullDownload:false, controller:null, statusText:'', allyQuery:'',
+  loadingFullView:false, viewRevision:0,
 };
 
 function loadJSON(key, fallback) {
@@ -77,24 +83,64 @@ function profileTitle() {
   $('profileMeta').textContent = [profile?.platformName || profile?.platform, country(profile), `Profile ID ${state.profileId}`, profile?.steamId ? `Steam ID ${profile.steamId}` : ''].filter(Boolean).join(' · ');
   const leaderboards = (profile?.leaderboards || []).filter(item => Number.isFinite(item.rating)).slice(0,3);
   $('profileRatings').innerHTML = leaderboards.map(item => `<div class="rating"><span>${esc(item.leaderboardId || item.name)}</span><strong>${item.rating}</strong></div>`).join('');
-  $('matchLimit').value = String(state.limit);
-  $('syncStatus').textContent = state.lastSync ? `Última actualización: ${dateText(state.lastSync)}` : 'Todavía no se sincronizaron partidas.';
+  $('matchLimit').value = state.fullView ? 'all' : String(state.limit);
+  $('syncStatus').textContent = state.statusText || (state.lastSync ? `Caché local · última actualización: ${dateText(state.lastSync)}` : 'Todavía no se sincronizaron partidas.');
+  const complete = state.archiveMeta?.complete;
+  $('archiveStatus').textContent = state.storageError || (complete
+    ? `Fin del historial disponible en Companion · ${state.archiveCount} partidas guardadas en este navegador.`
+    : state.archiveCount ? `${state.archiveCount} partidas guardadas${state.archiveMeta?.nextPage > 1 ? ' · descarga completa parcial' : ''}.`
+      : 'El historial completo se descarga sólo si lo solicitás.');
+  $('fullHistoryButton').textContent = complete
+    ? (state.fullView ? 'Historial completo visible' : 'Ver historial completo')
+    : state.archiveMeta?.nextPage > 1 ? 'Continuar historial completo' : 'Cargar historial completo';
+  $('fullHistoryButton').disabled = !state.storageReady || state.syncing || state.loadingFullView || (complete && state.fullView);
+  $('cancelHistoryButton').hidden = !state.fullDownload;
+  $('syncButton').disabled = state.syncing || state.loadingFullView;
 }
-function restoreCache(id) {
-  const cache = loadJSON(cacheKey(id), null);
-  if (cache?.version === 1 && String(cache.profileId) === String(id) && Array.isArray(cache.matches)) {
-    state.profile = cache.profile || null;
-    state.matches = cache.matches;
-    state.lastSync = cache.fetchedAt || null;
-    state.cachedLimit = cache.limit || 0;
+function cancelActive() {
+  state.controller?.abort();
+  state.controller = null;
+  state.syncing = false;
+  state.fullDownload = false;
+  state.loadingFullView = false;
+}
+async function restoreCache(id, generation) {
+  const legacy = loadJSON(cacheKey(id), null);
+  if (legacy?.version === 1 && String(legacy.profileId) === String(id) && Array.isArray(legacy.matches)) {
+    state.profile = legacy.profile || state.profile;
+    state.matches = legacy.matches.slice(0,state.limit);
+    state.lastSync = legacy.fetchedAt || null;
+    state.cachedLimit = legacy.limit || 0;
+    state.archiveCount = legacy.matches.length;
+    state.statusText = 'Mostrando caché local anterior.';
+    render();
   }
   state.annotations = loadJSON(noteKey(id), {});
+  try {
+    const migrated = await historyStore.migrateLegacy(id, legacy);
+    const [meta, count, recent] = await Promise.all([
+      historyStore.getMeta(id), historyStore.count(id), historyStore.getRecent(id, state.limit),
+    ]);
+    if (generation !== state.generation) return;
+    state.storageReady = true;
+    state.archiveMeta = meta;
+    state.archiveCount = count;
+    state.profile = state.profile || meta?.profile || null;
+    state.matches = recent;
+    state.lastSync = meta?.lastSync || state.lastSync;
+    state.cachedLimit = meta?.recentLimit || state.cachedLimit;
+    if (recent.length) state.statusText = `Mostrando ${recent.length} partidas desde la caché local.`;
+    if (migrated) localStorage.removeItem(cacheKey(id));
+  } catch (error) {
+    if (generation !== state.generation) return;
+    state.storageError = `IndexedDB no está disponible: ${error.message} La descarga completa requiere almacenamiento local.`;
+    state.statusText = state.matches.length ? 'Mostrando la caché anterior.' : '';
+  }
 }
 async function selectProfile(id, profile = null, push = true) {
   if (!/^\d+$/.test(String(id))) return;
+  cancelActive();
   state.generation++;
-  state.syncing = false;
-  $('syncButton').disabled = false;
   const generation = state.generation;
   state.profileId = String(id);
   state.profile = profile;
@@ -102,8 +148,15 @@ async function selectProfile(id, profile = null, push = true) {
   state.lastSync = null;
   state.cachedLimit = 0;
   state.shown = 25;
+  state.sessionsShown = 12;
   state.annotations = {};
-  restoreCache(id);
+  state.archiveMeta = null;
+  state.archiveCount = 0;
+  state.storageReady = false;
+  state.storageError = '';
+  state.fullView = false;
+  state.statusText = '';
+  state.allyQuery = '';
   if (profile) state.profile = profile;
   localStorage.setItem('war-council:profile', state.profileId);
   writeURL(push);
@@ -111,46 +164,147 @@ async function selectProfile(id, profile = null, push = true) {
   errorMessage();
   profileTitle();
   render();
-  try {
-    const freshProfile = await getProfile(id);
-    if (generation !== state.generation) return;
-    state.profile = freshProfile;
-    profileTitle();
-  } catch (error) {
+  const detail = getProfile(id).then(freshProfile => {
+    if (generation === state.generation) { state.profile = freshProfile; profileTitle(); }
+  }).catch(error => {
     if (generation === state.generation) errorMessage(`No se pudo actualizar el perfil: ${error.message}`);
-  }
+  });
+  await restoreCache(id, generation);
   if (generation !== state.generation) return;
-  if (!state.lastSync || Date.now() - Date.parse(state.lastSync) > 30 * 60000 || state.cachedLimit < state.limit) await synchronize();
+  render();
+  await detail;
+  if (generation !== state.generation) return;
+  const fresh = state.lastSync && Date.now() - Date.parse(state.lastSync) < 30 * 60000;
+  if (!state.archiveMeta?.complete && (!fresh || (state.cachedLimit < state.limit && state.archiveCount < state.limit))) await synchronize();
 }
 async function synchronize(force = false) {
   if (state.syncing || !state.profileId) return;
-  if (!force && state.lastSync && Date.now() - Date.parse(state.lastSync) < 30 * 60000 && state.cachedLimit >= state.limit) return;
+  if (!force && state.lastSync && Date.now() - Date.parse(state.lastSync) < 30 * 60000 && (state.cachedLimit >= state.limit || state.archiveCount >= state.limit)) return;
   const id = state.profileId;
   const generation = state.generation;
+  const controller = new AbortController();
+  state.controller = controller;
   state.syncing = true;
-  $('syncButton').disabled = true;
+  state.fullDownload = false;
   errorMessage();
-  $('syncStatus').textContent = 'Sincronizando partidas…';
+  state.statusText = 'Actualizando partidas recientes…';
+  profileTitle();
   try {
-    const raw = await getMatches(id, state.limit, count => {
-      if (generation === state.generation) $('syncStatus').textContent = `Sincronizando… ${count} partidas obtenidas`;
-    });
-    if (generation !== state.generation) return;
-    state.matches = normalizeMatches(raw, id);
-    state.lastSync = new Date().toISOString();
-    state.cachedLimit = state.limit;
-    saveJSON(cacheKey(id), { version:1, profileId:id, profile:state.profile, matches:state.matches, fetchedAt:state.lastSync, limit:state.limit });
-    render();
-    profileTitle();
+    if (state.storageReady) {
+      const result = await refreshRecent({ profileId:id, limit:state.limit, store:historyStore, signal:controller.signal,
+        onProgress:count => {
+          if (generation === state.generation && state.controller === controller) {
+            state.statusText = `Actualizando recientes… ${count} obtenidas`;
+            profileTitle();
+          }
+        } });
+      if (generation !== state.generation || state.controller !== controller) return;
+      state.archiveMeta = result.meta;
+      state.archiveCount = result.count;
+      const recent = state.fullView ? null : await historyStore.getRecent(id,state.limit);
+      if (generation !== state.generation || state.controller !== controller) return;
+      state.matches = state.fullView ? mergeMatches(state.matches, result.matches) : recent;
+      state.lastSync = result.meta.lastSync;
+      state.cachedLimit = Math.max(state.cachedLimit,state.limit);
+    } else {
+      const raw = await getMatches(id,state.limit,() => {},{ signal:controller.signal });
+      if (generation !== state.generation || state.controller !== controller) return;
+      state.matches = normalizeMatches(raw,id);
+      state.lastSync = new Date().toISOString();
+      state.cachedLimit = state.limit;
+      saveJSON(cacheKey(id), { version:1, profileId:id, profile:state.profile, matches:state.matches, fetchedAt:state.lastSync, limit:state.limit });
+    }
+    state.statusText = `Actualizadas ${state.matches.length} partidas de la muestra reciente.`;
   } catch (error) {
-    if (generation === state.generation) {
-      errorMessage(`No se pudieron actualizar las partidas: ${error.message}${state.matches.length ? ' Se muestra la caché disponible.' : ''}`);
-      $('syncStatus').textContent = state.lastSync ? `Caché: ${dateText(state.lastSync)}` : 'Sin datos sincronizados.';
+    if (generation === state.generation && state.controller === controller) {
+      if (error.name === 'AbortError') state.statusText = 'Actualización cancelada; se conserva la caché.';
+      else {
+        errorMessage(`No se pudieron actualizar las partidas: ${error.message}${state.matches.length ? ' Se muestra la caché disponible.' : ''}`);
+        state.statusText = state.lastSync ? `Caché: ${dateText(state.lastSync)}` : 'Sin datos sincronizados.';
+      }
     }
   } finally {
-    if (generation === state.generation) {
+    if (generation === state.generation && state.controller === controller) {
+      state.controller = null;
       state.syncing = false;
-      $('syncButton').disabled = false;
+      render();
+    }
+  }
+}
+async function loadFullHistory() {
+  if (state.syncing || state.loadingFullView || !state.storageReady || !state.profileId) return;
+  const id = state.profileId;
+  const generation = state.generation;
+  const revision = ++state.viewRevision;
+  state.loadingFullView = true;
+  profileTitle();
+  let cached;
+  try {
+    cached = await historyStore.getAll(id);
+  } catch (error) {
+    if (generation === state.generation && revision === state.viewRevision) {
+      state.loadingFullView = false;
+      errorMessage(`No se pudo leer el historial guardado: ${error.message}`);
+      profileTitle();
+    }
+    return;
+  }
+  if (generation !== state.generation || revision !== state.viewRevision) return;
+  state.loadingFullView = false;
+  state.matches = mergeMatches([], cached);
+  state.fullView = true;
+  render();
+  if (state.archiveMeta?.complete) {
+    state.statusText = `Historial disponible completo cargado desde la caché · ${state.matches.length} partidas.`;
+    profileTitle();
+    return;
+  }
+  const controller = new AbortController();
+  state.controller = controller;
+  state.syncing = true;
+  state.fullDownload = true;
+  state.statusText = `Recuperando historial… ${state.archiveCount} partidas guardadas`;
+  errorMessage();
+  profileTitle();
+  try {
+    await downloadFullHistory({ profileId:id, store:historyStore, signal:controller.signal,
+      onPage:({ matches,count }) => {
+        if (generation !== state.generation || state.controller !== controller) return;
+        state.matches = mergeMatches(state.matches,matches);
+        state.archiveCount = count;
+        render();
+      },
+      onProgress:({ status,count,total }) => {
+        if (generation !== state.generation || state.controller !== controller) return;
+        const percent = total ? ` · ${Math.min(100,Math.round(count/total*100))}%` : '';
+        state.statusText = status === 'complete'
+          ? `Fin del historial disponible en Companion · ${count} partidas guardadas.`
+          : `Recuperando historial… ${count} partidas descargadas${percent}`;
+        profileTitle();
+      },
+    });
+  } catch (error) {
+    if (generation === state.generation && state.controller === controller) {
+      state.statusText = error.name === 'AbortError'
+        ? `Descarga interrumpida · ${state.archiveCount} partidas conservadas.`
+        : `Descarga parcial · ${state.archiveCount} partidas conservadas.`;
+      if (error.name !== 'AbortError') errorMessage(`${error.message} Podés continuar la descarga más tarde.`);
+    }
+  } finally {
+    if (generation === state.generation && state.controller === controller) {
+      try {
+        const [meta,count] = await Promise.all([historyStore.getMeta(id), historyStore.count(id)]);
+        if (generation !== state.generation || state.controller !== controller) return;
+        state.archiveMeta = meta;
+        state.archiveCount = count;
+      } catch (error) {
+        if (generation === state.generation && state.controller === controller)
+          errorMessage(`No se pudo leer el progreso guardado: ${error.message}`);
+      }
+      if (generation !== state.generation || state.controller !== controller) return;
+      state.controller = null;
+      state.syncing = false;
+      state.fullDownload = false;
       render();
     }
   }
@@ -161,16 +315,28 @@ function selectOptions(values, selected, allLabel) {
 function filterSelect(label, name, options) {
   return `<label class="filter-field"><span>${esc(label)}</span><select data-filter="${name}">${options}</select></label>`;
 }
-function allAllies() {
+function allyCatalog() {
+  if (state.allyCache?.source === state.matches) return state.allyCache.catalog;
   const map = new Map();
-  for (const match of state.matches) for (const ally of match.allies) map.set(ally.id, ally.name);
-  return [...map].sort((a,b) => a[1].localeCompare(b[1], 'es'));
+  for (const match of state.matches) for (const ally of match.allies) {
+    const item = map.get(ally.id) || { id:ally.id, name:ally.name, games:0 };
+    item.name = ally.name;
+    item.games++;
+    map.set(ally.id,item);
+  }
+  const catalog = [...map.values()].sort((a,b) => b.games - a.games || a.name.localeCompare(b.name,'es'));
+  state.allyCache = { source:state.matches, catalog };
+  return catalog;
 }
 function renderFilters(filtered) {
   const f = state.filters;
-  const allies = allAllies();
+  const catalog = allyCatalog();
+  const query = state.allyQuery.toLocaleLowerCase('es');
+  const selected = catalog.filter(ally => f.allies.includes(ally.id));
+  const available = catalog.filter(ally => !f.allies.includes(ally.id) && (!query || ally.name.toLocaleLowerCase('es').includes(query)));
+  const allies = [...selected, ...available.slice(0,40)];
   $('filterControls').innerHTML = `
-    <div class="filter-field"><span>Compañeros</span><div class="ally-checks">${allies.length ? allies.map(([id,name]) => `<label><input type="checkbox" data-ally="${id}" ${f.allies.includes(id) ? 'checked' : ''}><span>${esc(name)}</span></label>`).join('') : '<span class="muted">Todavía no hay aliados en este historial.</span>'}</div></div>
+    <div class="filter-field"><span>Compañeros</span><input class="ally-search" id="allySearch" type="search" value="${esc(state.allyQuery)}" placeholder="Buscar compañero"><div class="ally-checks">${allies.length ? allies.map(({id,name}) => `<label><input type="checkbox" data-ally="${id}" ${f.allies.includes(id) ? 'checked' : ''}><span>${esc(name)}</span></label>`).join('') : '<span class="muted">No hay aliados para esta búsqueda.</span>'}</div>${available.length > 40 ? `<small class="ally-note">Mostrando 40 de ${available.length}; buscá por nombre para ver otros.</small>` : ''}</div>
     <label class="check-field"><input id="allAllies" type="checkbox" ${f.allAllies ? 'checked' : ''} ${f.allies.length < 2 ? 'disabled' : ''}>Jugamos todos juntos</label>
     ${filterSelect('Civilización','civ',selectOptions(unique(state.matches.map(m => m.self.civ)), f.civ, 'Todas'))}
     ${filterSelect('Mapa','map',selectOptions(unique(state.matches.map(m => m.map)), f.map, 'Todos'))}
@@ -179,7 +345,7 @@ function renderFilters(filtered) {
     ${filterSelect('Modo / leaderboard','mode',selectOptions(unique(state.matches.map(m => m.leaderboard)), f.mode, 'Todos'))}
     ${filterSelect('Fecha','days',`<option value="0">Todas</option>${[7,30,90].map(days => `<option value="${days}" ${Number(f.days) === days ? 'selected' : ''}>Últimos ${days} días</option>`).join('')}`)}
   `;
-  $('filterCount').textContent = `${filtered.length} de ${state.matches.length} partidas en la muestra`;
+  $('filterCount').textContent = `${filtered.length} visibles de ${state.matches.length} en ${state.fullView ? 'el historial' : 'la muestra'} · ${state.archiveCount || state.matches.length} descargadas`;
 }
 function card(label, value, detail = '') {
   return `<article class="summary-card panel"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(detail)}</small></article>`;
@@ -193,11 +359,11 @@ function renderSummary(matches) {
   const ratingMatch = matches.find(m => Number.isFinite(m.self.rating));
   const rated = ratingMatch ? matches.filter(m => m.leaderboard === ratingMatch.leaderboard && Number.isFinite(m.self.ratingDiff)) : [];
   const change = rated.length ? rated.reduce((total,m) => total + m.self.ratingDiff, 0) : null;
-  $('sampleCount').textContent = `${r.games} ${r.games === 1 ? 'partida' : 'partidas'} · ${sampleLabel(r.games)}`;
+  $('sampleCount').textContent = `${r.games} ${r.games === 1 ? 'partida' : 'partidas'} · ${state.fullView ? r.games === state.matches.length ? 'Historial disponible' : 'Historial filtrado' : sampleLabel(r.games)}`;
   $('summaryCards').innerHTML = [
     card('Partidas', r.games, `${r.wins} victorias · ${r.losses} derrotas${r.unknown ? ` · ${r.unknown} sin resultado` : ''}`),
     card('Win rate', r.rate, `${r.wins + r.losses} partidas con resultado`),
-    card('Racha reciente', streakCount ? `${streakCount} ${streakType === 'win' ? 'W' : 'L'}` : '—', 'En esta muestra'),
+    card('Racha reciente', streakCount ? `${streakCount} ${streakType === 'win' ? 'W' : 'L'}` : '—', state.fullView ? 'En este historial' : 'En esta muestra'),
     card('Rating', ratingMatch?.self.rating ?? '—', ratingMatch ? `Último registrado · ${ratingMatch.leaderboard}` : 'No disponible'),
     card('Cambio de rating', change === null ? '—' : `${change > 0 ? '+' : ''}${change}`, ratingMatch ? `Suma de partidas mostradas · ${ratingMatch.leaderboard}` : 'No disponible'),
   ].join('');
@@ -227,9 +393,9 @@ function renderBreakdown(matches) {
   $('mapList').innerHTML = maps.length ? sortedStats(maps, state.mapSort).map(item => statLine(item, `data-pick-map="${esc(item.key)}"`)).join('') : '<p class="empty-inline">Sin datos para estos filtros.</p>';
 }
 function renderAllies(matches) {
-  const names = new Map(allAllies());
+  const names = new Map(allyCatalog().map(item => [item.id,item.name]));
   const allies = aggregate(matches, m => m.allies.map(a => String(a.id)));
-  $('alliesList').innerHTML = allies.length ? allies.map(item => `<button class="ally-card ${state.filters.allies.includes(Number(item.key)) ? 'active' : ''}" data-pick-ally="${esc(item.key)}" type="button"><span class="ally-name">${esc(names.get(Number(item.key)) || `#${item.key}`)}</span><small>Profile ID ${esc(item.key)}</small><strong>${item.games} juntos · ${pct(item.wins,item.wins+item.losses)}</strong><span>${item.wins}W / ${item.losses}L · ${sampleLabel(item.games)}</span></button>`).join('') : '<p class="empty-inline">No hay aliados en la muestra. Los rivales nunca se cuentan acá.</p>';
+  $('alliesList').innerHTML = allies.length ? allies.slice(0,60).map(item => `<button class="ally-card ${state.filters.allies.includes(Number(item.key)) ? 'active' : ''}" data-pick-ally="${esc(item.key)}" type="button"><span class="ally-name">${esc(names.get(Number(item.key)) || `#${item.key}`)}</span><small>Profile ID ${esc(item.key)}</small><strong>${item.games} juntos · ${pct(item.wins,item.wins+item.losses)}</strong><span>${item.wins}W / ${item.losses}L · ${sampleLabel(item.games)}</span></button>`).join('') + (allies.length > 60 ? `<p class="ally-note">Mostrando los 60 aliados más frecuentes de ${allies.length}; podés buscar los demás en los filtros.</p>` : '') : '<p class="empty-inline">No hay aliados en la muestra. Los rivales nunca se cuentan acá.</p>';
 }
 function comboGroup(title, items) {
   return `<div class="combo-column"><h3>${esc(title)}</h3>${items.length ? items.slice(0,6).map(item => `<div class="combo-row"><b>${esc(item.key.replaceAll('\u001f',' · '))}</b><span>${item.games} partidas · ${item.wins}W / ${item.losses}L · ${pct(item.wins,item.wins+item.losses)}</span><small>${sampleLabel(item.games)}</small></div>`).join('') : '<p class="empty-inline">Sin combinaciones suficientes.</p>'}</div>`;
@@ -242,13 +408,14 @@ function renderCombos(matches) {
 }
 function renderSessions(matches) {
   const groups = sessions(matches);
-  $('sessionList').innerHTML = groups.length ? groups.slice(0,12).map(group => {
+  $('sessionList').innerHTML = groups.length ? groups.slice(0,state.sessionsShown).map(group => {
     const r = record(group.matches);
     const maps = unique(group.matches.map(m => m.map)).slice(0,4);
     const civs = unique(group.matches.map(m => m.self.civ)).slice(0,4);
     const allies = unique(group.matches.flatMap(m => m.allies.map(a => a.name))).slice(0,5);
     return `<article class="session-row"><div><strong>${esc(dateText(group.newest))}</strong><small>${r.games} partidas · ${r.wins}W / ${r.losses}L · ${r.rate}</small></div><div><span>Mapas</span><p>${esc(maps.join(' · ') || '—')}</p></div><div><span>Civs</span><p>${esc(civs.join(' · ') || '—')}</p></div><div><span>Aliados</span><p>${esc(allies.join(' · ') || '—')}</p></div></article>`;
   }).join('') : '<p class="empty-inline">No hay sesiones para estos filtros.</p>';
+  $('moreSessions').hidden = groups.length <= state.sessionsShown;
 }
 function renderHistory(matches) {
   $('historyCount').textContent = `${matches.length} partidas`;
@@ -276,16 +443,21 @@ function render() {
 }
 function updateFilter() {
   state.shown = 25;
+  state.sessionsShown = 12;
   writeURL();
   render();
 }
 function changePlayer() {
+  cancelActive();
   state.generation++;
-  state.syncing = false;
-  $('syncButton').disabled = false;
   state.profileId = null;
   state.profile = null;
   state.matches = [];
+  state.archiveMeta = null;
+  state.archiveCount = 0;
+  state.storageReady = false;
+  state.fullView = false;
+  state.statusText = '';
   state.filters = initialFilters();
   localStorage.removeItem('war-council:profile');
   writeURL(true);
@@ -332,12 +504,45 @@ $('searchResults').addEventListener('click', event => {
 });
 $('changePlayer').addEventListener('click', changePlayer);
 $('syncButton').addEventListener('click', () => synchronize(true));
-$('matchLimit').addEventListener('change', event => {
+$('fullHistoryButton').addEventListener('click', () => loadFullHistory());
+$('cancelHistoryButton').addEventListener('click', () => state.controller?.abort());
+$('matchLimit').addEventListener('change', async event => {
+  if (event.target.value === 'all') { await loadFullHistory(); return; }
+  const revision = ++state.viewRevision;
+  cancelActive();
   state.limit = Number(event.target.value);
   localStorage.setItem('war-council:limit', String(state.limit));
-  synchronize(true);
+  state.fullView = false;
+  state.shown = 25;
+  const id = state.profileId;
+  const generation = state.generation;
+  if (state.storageReady) {
+    try {
+      const [recent,meta,count] = await Promise.all([
+        historyStore.getRecent(id,state.limit), historyStore.getMeta(id), historyStore.count(id),
+      ]);
+      if (generation !== state.generation || revision !== state.viewRevision) return;
+      state.matches = recent;
+      state.archiveMeta = meta;
+      state.archiveCount = count;
+    } catch (error) {
+      if (generation === state.generation && revision === state.viewRevision) errorMessage(`No se pudo leer la caché: ${error.message}`);
+      return;
+    }
+  } else state.matches = state.matches.slice(0,state.limit);
+  state.statusText = `Mostrando las últimas ${state.matches.length} partidas desde la caché.`;
+  render();
+  if (state.matches.length < state.limit && !state.archiveMeta?.complete && state.cachedLimit < state.limit) await synchronize(true);
 });
 $('clearFilters').addEventListener('click', () => { state.filters = initialFilters(); updateFilter(); });
+$('filterControls').addEventListener('input', event => {
+  if (event.target.id !== 'allySearch') return;
+  state.allyQuery = event.target.value;
+  const position = event.target.selectionStart;
+  renderFilters(filterMatches(state.matches,state.filters));
+  $('allySearch').focus();
+  $('allySearch').setSelectionRange(position,position);
+});
 $('filterControls').addEventListener('change', event => {
   const target = event.target;
   if (target.dataset.ally) {
@@ -367,6 +572,7 @@ $('mapList').addEventListener('click', event => {
 $('civSort').addEventListener('change', event => { state.civSort = event.target.value; render(); });
 $('mapSort').addEventListener('change', event => { state.mapSort = event.target.value; render(); });
 $('moreHistory').addEventListener('click', () => { state.shown += 25; renderHistory(filterMatches(state.matches,state.filters)); });
+$('moreSessions').addEventListener('click', () => { state.sessionsShown += 12; renderSessions(filterMatches(state.matches,state.filters)); });
 $('historyList').addEventListener('click', event => {
   const button = event.target.closest('[data-match]');
   if (button) openMatch(button.dataset.match);

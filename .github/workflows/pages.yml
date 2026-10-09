@@ -26,7 +26,7 @@ jobs:
       - name: Stage static site
         run: |
           mkdir _site
-          cp index.html styles.css app.js api.js data.js _site/
+          cp index.html styles.css app.js api.js data.js history.js storage.js _site/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

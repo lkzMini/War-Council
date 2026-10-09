@@ -47,3 +47,23 @@ test('searches Steam ID and Profile ID through their distinct endpoints', async 
     assert.match(urls[1],/\/profiles\/12345$/);
   } finally { globalThis.fetch = original; }
 });
+
+test('retries HTTP 429 and respects cancellation', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return calls === 1
+      ? { ok:false, status:429, headers:{ get:() => '0' } }
+      : { ok:true, json:async () => ({ matches:[] }) };
+  };
+  try {
+    const data = await request('/matches?retry-test=1');
+    assert.deepEqual(data.matches,[]);
+    assert.equal(calls,2);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(request('/matches?cancel-test=1',{signal:controller.signal}),{name:'AbortError'});
+    assert.equal(calls,2);
+  } finally { globalThis.fetch = original; }
+});

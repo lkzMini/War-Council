@@ -41,9 +41,12 @@
         <div id="profileRatings" class="rating-list"></div>
         <div class="sync-controls">
           <label for="matchLimit">Historial</label>
-          <select id="matchLimit"><option value="50">Últimas 50</option><option value="100">Últimas 100</option><option value="200">Últimas 200</option></select>
+          <select id="matchLimit"><option value="50">Últimas 50</option><option value="100">Últimas 100</option><option value="200">Últimas 200</option><option value="all">Historial completo</option></select>
           <button class="button gold" id="syncButton" type="button">Actualizar partidas</button>
+          <button class="button quiet" id="fullHistoryButton" type="button">Cargar historial completo</button>
+          <button class="button quiet" id="cancelHistoryButton" type="button" hidden>Cancelar descarga</button>
           <p id="syncStatus" class="muted" role="status"></p>
+          <p id="archiveStatus" class="muted" role="status"></p>
         </div>
       </section>
       <div id="errorMessage" class="alert" role="alert" hidden></div>
@@ -66,7 +69,7 @@
             <section id="mapas" class="section panel"><div class="section-title"><div><p class="eyebrow">TERRENO</p><h2>Mapas</h2></div><select id="mapSort" aria-label="Ordenar mapas"><option value="games">Más jugados</option><option value="rate">Mayor win rate</option></select></div><div id="mapList"></div></section>
           </div>
           <section id="combinaciones" class="section panel"><div class="section-title"><div><p class="eyebrow">CRUCES ÚTILES</p><h2>Combinaciones</h2></div></div><div id="combinationList" class="combination-grid"></div></section>
-          <section id="sesiones" class="section panel"><div class="section-title"><div><p class="eyebrow">NOCHES DE JUEGO</p><h2>Sesiones</h2></div></div><p class="section-help">Una pausa de más de 3 horas inicia otra sesión.</p><div id="sessionList"></div></section>
+          <section id="sesiones" class="section panel"><div class="section-title"><div><p class="eyebrow">NOCHES DE JUEGO</p><h2>Sesiones</h2></div></div><p class="section-help">Una pausa de más de 3 horas inicia otra sesión.</p><div id="sessionList"></div><button id="moreSessions" class="button quiet more" type="button" hidden>Mostrar más sesiones</button></section>
           <section id="historial" class="section panel"><div class="section-title"><div><p class="eyebrow">PARTIDA A PARTIDA</p><h2>Historial</h2></div><span id="historyCount" class="muted"></span></div><div id="historyList"></div><button id="moreHistory" class="button quiet more" type="button" hidden>Mostrar más</button></section>
         </div>
       </div>
